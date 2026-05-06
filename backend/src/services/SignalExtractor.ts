@@ -1,8 +1,10 @@
 /**
  * Extracts pedagogical signals from a raw user message.
  *
- * Fix: max_tokens raised from 80 to 150 so the mastery JSON response
- * is never truncated (was producing 0-char responses on every turn).
+ * max_tokens raised to 256 — the {masteryDemonstrated, reason} JSON needs
+ * ~60-80 tokens minimum; 150 was hitting finish=length every turn.
+ * System prompt now instructs the model to keep reason ≤ 8 words so the
+ * boolean stays reliable without wasting tokens on long explanations.
  */
 import { TurnSignals } from "../types/index.js";
 import { chatCompletion } from "./LmStudioClient.js";
@@ -82,27 +84,31 @@ export async function extractSignals(
   let masteryDemonstrated = false;
 
   try {
-    // max_tokens raised to 150 — the JSON response needs ~60-80 tokens;
-    // 80 was causing finish_reason=length and 0-char responses every turn.
+    // max_tokens=256: gives the model enough room for the JSON + a short reason
+    // without burning tokens on lengthy explanations.
     const response = await chatCompletion(
       [
         {
           role:    "system",
-          content: `You are a pedagogical signal classifier. Given a student message, respond ONLY with a JSON object: {"masteryDemonstrated": boolean, "reason": string}. masteryDemonstrated is true if the student clearly explains WHY something works, correctly predicts behaviour, or gives an accurate and unprompted explanation of a concept.`,
+          content:
+            'You are a pedagogical signal classifier. ' +
+            'Respond ONLY with JSON: {"masteryDemonstrated":boolean,"reason":"max 8 words"}. ' +
+            'masteryDemonstrated=true only if the student clearly explains WHY something works, ' +
+            'correctly predicts behaviour, or gives an accurate unprompted explanation.',
         },
         {
           role:    "user",
           content: `Student message: ${message}`,
         },
       ],
-      { temperature: 0.1, max_tokens: 150 },
+      { temperature: 0.1, max_tokens: 256 },
     );
 
     const start = response.indexOf("{");
     const end   = response.lastIndexOf("}");
     if (start !== -1 && end > start) {
-      const parsed = JSON.parse(response.slice(start, end + 1)) as { masteryDemonstrated: boolean };
-      masteryDemonstrated = parsed.masteryDemonstrated ?? false;
+      const p = JSON.parse(response.slice(start, end + 1)) as { masteryDemonstrated: boolean };
+      masteryDemonstrated = p.masteryDemonstrated ?? false;
     }
   } catch (err) {
     logger.warn("Signal extraction LLM call failed, defaulting mastery=false", err);

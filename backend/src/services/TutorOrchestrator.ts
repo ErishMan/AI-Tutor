@@ -17,67 +17,34 @@ import { evaluatePolicy, updateLearnerState } from "./PolicyEngine.js";
 import { updateSession } from "./SessionStore.js";
 import logger from "../utils/logger.js";
 
-const LIVE_TURN_WINDOW  = 12;
-const MAX_CONTEXT_CHARS = 6000;
+// Reduced from 12 — keeps last 4 exchanges; limits prompt token spend.
+const LIVE_TURN_WINDOW  = 8;
+// Reduced from 6000 — hard ceiling so context never crowds out the response.
+const MAX_CONTEXT_CHARS = 3500;
 
 function buildSystemPrompt(session: Session, allowedModes: TutorMode[]): string {
-  return `You are an expert, warm, and Socratic programming tutor.
+  const ls = session.learnerState;
+  // Compact learner state — one line each saves ~120 chars vs the old block.
+  const learnerBlock = [
+    `skill=${ls.estimatedSkill.toFixed(2)} confusion=${ls.confusion.toFixed(2)} mastery=${ls.mastery.toFixed(2)} frustration=${ls.frustration.toFixed(2)} pace=${ls.preferredPace}`,
+    ls.misconceptions.length   ? `misconceptions: ${ls.misconceptions.join(", ")}` : "",
+    ls.masteredConcepts.length ? `mastered: ${ls.masteredConcepts.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
 
-Current session context:
-Topic: ${session.topic}
-Language: ${session.language}
-Difficulty: ${session.difficulty}
+  return `You are a warm, Socratic programming tutor.
+Topic: ${session.topic} | Language: ${session.language} | Difficulty: ${session.difficulty}
+LEARNER: ${learnerBlock}
+STYLE: Warm and encouraging. Never give the full solution. Adapt to learner skill.
+ALLOWED MODES: ${allowedModes.join(", ")} — you MUST pick one.
 
-LEARNER STATE
-Skill level (0-1): ${session.learnerState.estimatedSkill.toFixed(2)}
-Confusion (0-1): ${session.learnerState.confusion.toFixed(2)}
-Mastery (0-1): ${session.learnerState.mastery.toFixed(2)}
-Frustration (0-1): ${session.learnerState.frustration.toFixed(2)}
-Known misconceptions: ${session.learnerState.misconceptions.join(", ") || "none observed yet"}
-Mastered concepts: ${session.learnerState.masteredConcepts.join(", ") || "none confirmed yet"}
-Preferred pace: ${session.learnerState.preferredPace}
+Respond with ONE raw JSON object and NOTHING else — no markdown fences, no prose before or after.
+"tutorMessage" must be plain conversational text only (no JSON inside it).
 
-TEACHING STYLE
-- Be warm, encouraging, and Socratic.
-- Never write the complete solution.
-- Adapt depth and vocabulary to the learner's estimated skill.
-- Do not assume a programming language preference unless the learner explicitly states one.
+Schema (use null for unused tasks):
+{"mode":"chat|sandbox|test","tutorMessage":"...","objective":"...","reasoning":"...","newMisconceptions":[],"resolvedConcepts":[],"sandboxTask":{"instructions":"...","starterCode":"...","successCriteria":[],"hints":[],"language":"${session.language}"}|null,"testTask":{"prompt":"...","publicRubricItems":[],"hiddenRubricIds":[],"timeboxMinutes":null,"noHints":true,"language":"${session.language}"}|null}
 
-ALLOWED MODES for this turn: ${allowedModes.join(", ")}
-You MUST choose one of these modes only.
-
-You MUST respond with a single raw JSON object and NOTHING else.
-No markdown fences. No preamble. No explanation after the JSON.
-Do not put JSON inside "tutorMessage".
-"tutorMessage" must be plain conversational text for the learner.
-
-Schema:
-{
-  "mode": "chat" | "sandbox" | "test",
-  "tutorMessage": "plain text reply for the learner",
-  "objective": "pedagogical objective",
-  "reasoning": "internal reasoning",
-  "newMisconceptions": [],
-  "resolvedConcepts": [],
-  "sandboxTask": {
-    "instructions": "task instructions",
-    "starterCode": "starter code",
-    "successCriteria": ["criterion"],
-    "hints": ["hint"],
-    "language": "${session.language}"
-  } | null,
-  "testTask": {
-    "prompt": "test prompt",
-    "publicRubricItems": ["item"],
-    "hiddenRubricIds": ["id"],
-    "timeboxMinutes": null,
-    "noHints": true,
-    "language": "${session.language}"
-  } | null
-}
-
-Context summary from earlier in the session:
-${session.contextSummary ?? "No prior summary — this is the start of the session."}`;
+Session context so far:
+${session.contextSummary ?? "Start of session."}`;
 }
 
 function buildContextMessages(session: Session): LLMMessage[] {
@@ -90,7 +57,6 @@ function buildContextMessages(session: Session): LLMMessage[] {
 
     if (turn.codeSubmission) {
       content += `\n\`\`\`${turn.codeSubmission.language}\n${turn.codeSubmission.source}\n\`\`\``;
-
       if (turn.codeSubmission.executionResult) {
         const r = turn.codeSubmission.executionResult;
         content += `\nOutput: ${r.stdout || "(none)"}${r.stderr ? `\nError: ${r.stderr}` : ""}`;
@@ -98,7 +64,6 @@ function buildContextMessages(session: Session): LLMMessage[] {
     }
 
     if (charCount + content.length > MAX_CONTEXT_CHARS) break;
-
     charCount += content.length;
     messages.push({ role: turn.role as "user" | "assistant", content });
   }
@@ -107,59 +72,77 @@ function buildContextMessages(session: Session): LLMMessage[] {
 }
 
 /**
- * Extract the first complete-looking JSON object from a raw LLM response.
+ * Extract the first complete JSON object from a raw LLM response.
  *
- * Handles:
- * - Leading/trailing markdown fences (```json ... ```, ``` ... ```)
- * - Prose before or after the JSON block
- * - Truncated JSON (finish_reason=length): attempts bracket-completion repair
- *   so a cutoff sandbox response doesn't fall all the way back to chat mode.
+ * Strategy:
+ * 1. Strip markdown fences.
+ * 2. Find first { … last } — the happy path.
+ * 3. If truncated (no closing }), try a set of simple bracket repairs.
+ * 4. If all repairs fail, field-salvage: extract mode + tutorMessage via
+ *    regex so the learner always gets a meaningful reply even from a badly
+ *    truncated response, instead of "I'm here — what would you like to explore?"
  */
 function extractJSON(raw: string): string {
-  // Strip ALL markdown fence variants robustly
+  // Strip markdown fences
   let s = raw
     .replace(/^```[a-zA-Z]*\n?/gm, "")
     .replace(/^```\s*$/gm, "")
     .trim();
 
-  // Find the first '{' — skip any prose preamble
   const start = s.indexOf("{");
-  if (start === -1) return s; // no JSON at all; let JSON.parse fail naturally
+  if (start === -1) return s;
 
-  // Find the matching last '}'
+  // Happy path: well-formed object
   const end = s.lastIndexOf("}");
-  if (end > start) {
-    return s.slice(start, end + 1);
-  }
+  if (end > start) return s.slice(start, end + 1);
 
-  // end <= start means the JSON was truncated (no closing '}')
-  // Attempt progressive repair: append missing braces/brackets
+  // Truncated — attempt bracket repairs
   const partial = s.slice(start);
   const repairs = [
     partial + "}",
     partial + "\"}",
     partial + "\"\"}",
     partial + "null}",
-    partial + "]}" ,
+    partial + "\"null}",
+    partial + "]}}",
+    partial + "\"]}",
     partial + "\"}}",
     partial + "\"\"\n}}",
     partial + "null}}",
-    partial + "]}",
-    partial + "\"]}}",
+    partial + "null,\"testTask\":null}",
+    partial + "null,\"testTask\":null,\"sandboxTask\":null}",
   ];
 
   for (const attempt of repairs) {
-    try {
-      JSON.parse(attempt);
-      logger.warn("extractJSON: repaired truncated JSON response — some fields may be missing");
-      return attempt;
-    } catch {
-      // try next repair
-    }
+    try { JSON.parse(attempt); logger.warn("extractJSON: repaired truncated JSON"); return attempt; }
+    catch { /* try next */ }
   }
 
-  // All repairs failed; return the partial so JSON.parse gives a meaningful error
-  return partial;
+  // All repairs failed — field-salvage: build a minimal valid object from
+  // whatever fields we can regex out of the partial string.
+  logger.warn("extractJSON: all repairs failed, attempting field salvage");
+  try {
+    const modeMatch    = partial.match(/"mode"\s*:\s*"(chat|sandbox|test)"/);
+    const msgMatch     = partial.match(/"tutorMessage"\s*:\s*"((?:[^"\\]|\\.)*?)"/);
+    const mode         = modeMatch?.[1] ?? "chat";
+    const tutorMessage = msgMatch?.[1]
+      ? msgMatch[1].replace(/\\n/g, "\n").replace(/\\t/g, "\t")
+      : "";
+    const salvaged = JSON.stringify({
+      mode,
+      tutorMessage,
+      objective: "",
+      reasoning: "response was truncated",
+      newMisconceptions: [],
+      resolvedConcepts: [],
+      sandboxTask: null,
+      testTask: null,
+    });
+    logger.warn(`extractJSON: salvaged mode=${mode} tutorMessage=${tutorMessage.slice(0,80)}`);
+    return salvaged;
+  } catch {
+    return partial; // last resort — let JSON.parse fail with a clear error
+  }
 }
 
 function parseLLMDecision(
@@ -176,7 +159,7 @@ function parseLLMDecision(
     parsed = JSON.parse(extractJSON(raw));
   } catch {
     logger.warn("LLM returned non-JSON, falling back to chat mode");
-    logger.debug(`Raw LLM output was: ${raw.slice(0, 400)}`);
+    logger.debug(`Raw LLM output was: \n${raw.slice(0, 400)}`);
     return {
       mode:              "chat",
       tutorMessage:      raw.trim() || "I'm here — what would you like to explore?",
@@ -193,21 +176,22 @@ function parseLLMDecision(
     ? (parsed.mode as TutorMode)
     : allowedModes[0];
 
+  // Unwrap tutorMessage if the model accidentally nested it
   let tutorMessage = parsed.tutorMessage;
-
   if (typeof tutorMessage === "object" && tutorMessage !== null) {
     tutorMessage =
       (tutorMessage as Record<string, unknown>).tutorMessage ??
       JSON.stringify(tutorMessage);
   }
-
   if (typeof tutorMessage === "string" && tutorMessage.trim().startsWith("{")) {
     try {
       const inner = JSON.parse(tutorMessage) as Record<string, unknown>;
       tutorMessage = inner.tutorMessage ?? tutorMessage;
-    } catch {
-      // leave as-is
-    }
+    } catch { /* leave as-is */ }
+  }
+  // Fallback if tutorMessage is empty after all that
+  if (!tutorMessage || String(tutorMessage).trim() === "") {
+    tutorMessage = "I'm here — what would you like to explore?";
   }
 
   const sandboxTask =
@@ -222,7 +206,7 @@ function parseLLMDecision(
 
   return {
     mode,
-    tutorMessage:      String(tutorMessage ?? ""),
+    tutorMessage:      String(tutorMessage),
     objective:         String(parsed.objective ?? ""),
     reasoning:         String(parsed.reasoning ?? ""),
     newMisconceptions: (parsed.newMisconceptions as string[]) ?? [],
@@ -234,12 +218,12 @@ function parseLLMDecision(
 
 function buildUIDirectives(mode: TutorMode, frustration: number): UIDirectives {
   return {
-    openPanel:         mode === "test" ? "test" : mode === "sandbox" ? "editor" : "chat",
-    showRunButton:     mode === "sandbox" || mode === "test",
-    lockSolutionView:  mode === "test",
-    showHintButton:    mode === "sandbox",
+    openPanel:          mode === "test" ? "test" : mode === "sandbox" ? "editor" : "chat",
+    showRunButton:      mode === "sandbox" || mode === "test",
+    lockSolutionView:   mode === "test",
+    showHintButton:     mode === "sandbox",
     showProgressUpdate: frustration < 0.3,
-    progressMessage:   frustration < 0.3 ? "You're making great progress! 🚀" : undefined,
+    progressMessage:    frustration < 0.3 ? "You're making great progress! 🚀" : undefined,
   };
 }
 
@@ -260,15 +244,13 @@ async function maybeCompressSummary(
         {
           role:    "system",
           content:
-            "Summarise this tutoring session excerpt in 3-5 bullet points. Focus on: " +
-            "what concepts were covered, any mistakes the learner made, and their current " +
-            "understanding. Be concise.",
+            "Summarise this tutoring session in 3-5 bullets: concepts covered, " +
+            "learner mistakes, current understanding. Be concise.",
         },
         { role: "user", content: text },
       ],
       { temperature: 0.3, max_tokens: 300 }
     );
-
     return `${session.contextSummary ?? ""}\n\n### Session summary (auto):\n${summary}`;
   } catch {
     logger.warn("Context compression failed");
@@ -303,12 +285,11 @@ export async function orchestrate(
     { role: "user", content: userTurnContent },
   ];
 
-  // json_mode is intentionally false: this model build rejects response_format
-  // with HTTP 400. The system prompt instructs the model to reply with raw JSON,
-  // and extractJSON + parseLLMDecision handle any prose wrapping or truncation.
+  // json_mode off — local models reject response_format with HTTP 400.
+  // Raised to 2400 to give the full sandbox/test JSON object enough headroom.
   const rawResponse = await chatCompletion(messages, {
     temperature: 0.65,
-    max_tokens:  1800,
+    max_tokens:  2400,
     json_mode:   false,
   });
 
@@ -348,9 +329,9 @@ export async function orchestrate(
   const updatedSummary = await maybeCompressSummary(session, composedTurns);
 
   updateSession(session.id, {
-    turns:       composedTurns,
+    turns:        composedTurns,
     learnerState: finalLearnerState,
-    currentMode: parsed.mode,
+    currentMode:  parsed.mode,
     ...(updatedSummary ? { contextSummary: updatedSummary } : {}),
   });
 
