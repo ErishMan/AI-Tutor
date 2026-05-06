@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   SessionState, SessionAction, ConversationMessage,
   LearnerState, UIDirectives, TutorDecision,
-  SandboxTask, TestTask, TutorMode,
+  SandboxTask, TestTask, TutorMode, Language, ExecutionResult,
 } from "@/types";
 import {
   sendChatMessage, executeCode, requestHint as apiRequestHint,
@@ -78,7 +78,6 @@ function sessionReducer(state: SessionState, action: SessionAction): SessionStat
       };
     }
 
-    // BUG FIX 2: new action to restore panel state when loading a saved conversation
     case "RESTORE_PANEL": {
       const p = action.payload;
       return {
@@ -138,9 +137,17 @@ export function useTutorSession() {
 
   // ── sendMessage ─────────────────────────────────────────────────────────────
 
-  const sendMessage = useCallback(async (message: string) => {
+  const sendMessage = useCallback(async (
+    message:     string,
+    codeSource?: string,
+    codeLanguage?: Language,
+  ) => {
     const userMsg: ConversationMessage = {
-      id: uuidv4(), role: "user", content: message, timestamp: Date.now(),
+      id:        uuidv4(),
+      role:      "user",
+      content:   message,
+      timestamp: Date.now(),
+      ...(codeSource ? { code: { source: codeSource, language: codeLanguage ?? state.language } } : {}),
     };
     dispatch({ type: "ADD_MESSAGE", payload: userMsg });
     dispatch({ type: "SET_LOADING", payload: true });
@@ -149,10 +156,9 @@ export function useTutorSession() {
       const { sessionId: returnedId, decision } = await sendChatMessage({
         sessionId: state.sessionId,
         message,
+        ...(codeSource ? { codeContext: { source: codeSource, language: codeLanguage ?? (state.language === "general" ? "python" : state.language) } } : {}),
       });
 
-      // Always record the backend sessionId (handles resumed sessions that got
-      // a fresh id from the backend after a timeout).
       if (returnedId && returnedId !== state.sessionId) {
         dispatch({ type: "SET_SESSION_ID", payload: returnedId });
       }
@@ -180,47 +186,49 @@ export function useTutorSession() {
       };
       dispatch({ type: "ADD_MESSAGE", payload: errorMsg });
     }
-  }, [state.sessionId]);
+  }, [state.sessionId, state.language]);
 
   // ── runCode ─────────────────────────────────────────────────────────────────
+  // Now returns the ExecutionResult directly so EditorPanel can display it.
+  // No longer dispatches SET_EXECUTION_RESULT against a phantom msgId.
 
-  const runCode = useCallback(async (source: string, msgId: string) => {
-    // BUG FIX 1: was silently returning when sessionId was undefined after
-    // loading a saved conversation (handleSelectConversation never restored it).
-    // Now we log a clear warning so the issue is obvious if it ever recurs.
+  const runCode = useCallback(async (
+    source:   string,
+    language: Language,
+  ): Promise<ExecutionResult> => {
     if (!state.sessionId) {
-      console.warn("runCode: no sessionId — cannot execute. Was the session restored correctly?");
-      return;
+      console.warn("runCode: no sessionId — cannot execute.");
+      return { stdout: "", stderr: "No active session. Send a message first.", exitCode: 1, runtimeMs: 0, timedOut: false };
     }
+
+    // Map `general` → `python` since the execute route doesn't accept `general`
+    const execLang: Language = language === "general" ? "python" : language;
 
     dispatch({ type: "SET_EXECUTING", payload: true });
-    dispatch({ type: "SET_LOADING",   payload: true });
 
     try {
-      const { result, tutorFeedback } = await executeCode({
-        sessionId: state.sessionId,
+      // withTutorFeedback is intentionally false — tutor feedback only fires
+      // on explicit Submit (sendMessage with codeContext), not on every Run.
+      const { result } = await executeCode({
+        sessionId:         state.sessionId,
         source,
-        language:  state.language,
-        withTutorFeedback: true,
+        language:          execLang,
+        withTutorFeedback: false,
       });
-
-      dispatch({ type: "SET_EXECUTION_RESULT", payload: { msgId, result } });
-
-      if (tutorFeedback) {
-        const feedbackMsg: ConversationMessage = {
-          id:        uuidv4(),
-          role:      "assistant",
-          content:   tutorFeedback,
-          timestamp: Date.now(),
-          mode:      state.currentMode,
-        };
-        dispatch({ type: "ADD_MESSAGE", payload: feedbackMsg });
-      }
+      return result;
+    } catch (err) {
+      console.error("runCode failed:", err);
+      return {
+        stdout:    "",
+        stderr:    err instanceof Error ? err.message : "Execution failed.",
+        exitCode:  1,
+        runtimeMs: 0,
+        timedOut:  false,
+      };
     } finally {
       dispatch({ type: "SET_EXECUTING", payload: false });
-      dispatch({ type: "SET_LOADING",   payload: false });
     }
-  }, [state.sessionId, state.language, state.currentMode]);
+  }, [state.sessionId]);
 
   // ── requestHint ─────────────────────────────────────────────────────────────
 

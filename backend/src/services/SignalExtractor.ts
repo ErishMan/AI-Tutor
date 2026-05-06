@@ -1,16 +1,8 @@
 /**
- * Extracts pedagogical signals from a raw user message,
- * using a lightweight LLM call for mastery detection,
- * with heuristics as fallback.
+ * Extracts pedagogical signals from a raw user message.
  *
- * Fix (issue 2):
- * Remove json_mode: true from the mastery-detection call.
- * This call runs before EVERY orchestration turn. Sending json_mode on a model
- * that doesn't support response_format caused a 400 on every single request,
- * forcing the fallback and adding latency noise before orchestration even ran.
- * The heuristic fallback (masteryDemonstrated = false) is safe, so we simply
- * drop the structured-output hint and rely on the system prompt instruction
- * and extractJSON in the caller to parse whatever the model returns.
+ * Fix: max_tokens raised from 80 to 150 so the mastery JSON response
+ * is never truncated (was producing 0-char responses on every turn).
  */
 import { TurnSignals } from "../types/index.js";
 import { chatCompletion } from "./LmStudioClient.js";
@@ -25,7 +17,6 @@ const CONFUSION_PATTERNS: RegExp[] = [
   /\?{2,}/,
 ];
 
-
 const FRUSTRATION_PATTERNS: RegExp[] = [
   /i'?ve tried everything/i,
   /this (is|makes) no sense/i,
@@ -34,7 +25,6 @@ const FRUSTRATION_PATTERNS: RegExp[] = [
   /i give up/i,
 ];
 
-
 const HELP_SEEKING_PATTERNS: RegExp[] = [
   /can you (help|show|explain|give|tell)/i,
   /how (do|would|should) (i|you|we)/i,
@@ -42,7 +32,6 @@ const HELP_SEEKING_PATTERNS: RegExp[] = [
   /give me a hint/i,
   /show me an? (example|how)/i,
 ];
-
 
 const EXPLICIT_TEST_PATTERNS: RegExp[] = [
   /test (me|my)/i,
@@ -57,7 +46,6 @@ const EXPLICIT_TEST_PATTERNS: RegExp[] = [
   /check (my|what i) know/i,
 ];
 
-
 const EXPLICIT_SANDBOX_PATTERNS: RegExp[] = [
   /let me (try|write|code|practice|have a go)/i,
   /i (want to|would like to|can i) try/i,
@@ -68,7 +56,6 @@ const EXPLICIT_SANDBOX_PATTERNS: RegExp[] = [
   /i('ll| will) (try|write|give it a go)/i,
   /set (me )?(up )?(a |an )?(challenge|exercise|problem)/i,
 ];
-
 
 function heuristicSignals(message: string): Partial<TurnSignals> {
   return {
@@ -81,13 +68,10 @@ function heuristicSignals(message: string): Partial<TurnSignals> {
   };
 }
 
-
 function detectPlagiarismRisk(_message: string, codeSource?: string): boolean {
   if (!codeSource) return false;
-  const lineCount = codeSource.split("\n").length;
-  return lineCount > 30;
+  return codeSource.split("\n").length > 30;
 }
-
 
 export async function extractSignals(
   message:     string,
@@ -98,9 +82,8 @@ export async function extractSignals(
   let masteryDemonstrated = false;
 
   try {
-    // Fix: removed json_mode: true — it caused HTTP 400 before every request on
-    // models that don't support response_format. The system prompt already asks
-    // for JSON; parseLLMDecision's extractJSON handles any wrapping.
+    // max_tokens raised to 150 — the JSON response needs ~60-80 tokens;
+    // 80 was causing finish_reason=length and 0-char responses every turn.
     const response = await chatCompletion(
       [
         {
@@ -112,11 +95,9 @@ export async function extractSignals(
           content: `Student message: ${message}`,
         },
       ],
-      { temperature: 0.1, max_tokens: 80 },
+      { temperature: 0.1, max_tokens: 150 },
     );
 
-    // Parse robustly — extract the first JSON object from the response in case
-    // the model prefixes it with prose (which can happen without json_mode).
     const start = response.indexOf("{");
     const end   = response.lastIndexOf("}");
     if (start !== -1 && end > start) {

@@ -1,19 +1,17 @@
 "use client";
 import { AnimatePresence, motion } from "motion/react";
-import { SessionState, ExecutionResult } from "@/types";
+import { SessionState, Language } from "@/types";
 import { EditorPanel } from "@/components/editor/EditorPanel";
-import { TestResultsPanel } from "@/components/test/TestResultsPanel";
 import { Code2, ClipboardCheck } from "lucide-react";
 
 interface RightPanelProps {
-  state:         SessionState;
-  onRun:         (source: string, msgId: string) => void;
+  state:      SessionState;
+  onRun:      (source: string, language: Language) => Promise<import("@/types").ExecutionResult>;
+  onSubmit:   (source: string, language: Language) => void;
   onRequestHint: () => Promise<string>;
-  lastResult?:   ExecutionResult;
-  lastFeedback?: string;
 }
 
-export function RightPanel({ state, onRun, onRequestHint, lastResult, lastFeedback }: RightPanelProps) {
+export function RightPanel({ state, onRun, onSubmit, onRequestHint }: RightPanelProps) {
   const panel = state.uiDirectives.openPanel;
   const showPanel = panel === "editor" || panel === "test";
 
@@ -53,21 +51,11 @@ export function RightPanel({ state, onRun, onRequestHint, lastResult, lastFeedba
           <EditorPanel
             state={state}
             onRun={onRun}
+            onSubmit={onSubmit}
             onRequestHint={onRequestHint}
           />
         </motion.div>
       </AnimatePresence>
-
-      {/* Test results dock */}
-      {panel === "test" && lastResult?.testResults && lastFeedback && (
-        <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-surface)] max-h-64 overflow-y-auto">
-          <TestResultsPanel
-            results={lastResult.testResults}
-            score={lastResult.testResults.filter(r => r.passed).length / lastResult.testResults.length}
-            feedback={lastFeedback}
-          />
-        </div>
-      )}
     </div>
   );
 }

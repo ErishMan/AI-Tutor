@@ -2,39 +2,43 @@
 import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "motion/react";
-import { Play, Lightbulb, CheckCircle2, Clock, ChevronDown } from "lucide-react";
-import { SessionState } from "@/types";
+import { Play, Lightbulb, CheckCircle2, Clock, ChevronDown, Send, Terminal, XCircle } from "lucide-react";
+import { SessionState, ExecutionResult, Language } from "@/types";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { v4 as uuidv4 } from "uuid";
 import { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 
 loader.config({ monaco });
 
-
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
-
 
 interface EditorPanelProps {
   state:         SessionState;
-  onRun:         (source: string, msgId: string) => void;
+  /** Run code locally and display output in the panel */
+  onRun:         (source: string, language: Language) => Promise<ExecutionResult>;
+  /** Submit code to the tutor for evaluation via chat */
+  onSubmit:      (source: string, language: Language) => void;
   onRequestHint: () => Promise<string>;
 }
 
-
-export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
+export function EditorPanel({ state, onRun, onSubmit, onRequestHint }: EditorPanelProps) {
   const task   = state.currentSandboxTask ?? state.currentTestTask;
   const isTest = state.currentMode === "test";
 
-  const [code, setCode] = useState(
-    state.currentSandboxTask?.starterCode ?? ""
-  );
-  const [hint, setHint]             = useState<string | null>(null);
-  const [hintLoading, setHintLoading] = useState(false);
-  const [showCriteria, setShowCriteria] = useState(true);
-  const msgIdRef = useState(() => uuidv4())[0];
+  const [code,          setCode]          = useState(state.currentSandboxTask?.starterCode ?? "");
+  const [hint,          setHint]          = useState<string | null>(null);
+  const [hintLoading,   setHintLoading]   = useState(false);
+  const [showCriteria,  setShowCriteria]  = useState(true);
+  const [runResult,     setRunResult]     = useState<ExecutionResult | null>(null);
+  const [isRunning,     setIsRunning]     = useState(false);
 
+  // Resolve execution language: task language > session language > python fallback
+  const execLanguage: Language = (
+    state.currentSandboxTask?.language ??
+    state.currentTestTask?.language ??
+    (state.language === "general" ? "python" : state.language)
+  );
 
   // Update starter code when task changes
   useEffect(() => {
@@ -42,14 +46,25 @@ export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
       setCode(state.currentSandboxTask.starterCode);
     }
     setHint(null);
+    setRunResult(null);
   }, [state.currentSandboxTask]);
 
-
-  const handleRun = () => {
-    if (!code.trim()) return;
-    onRun(code, msgIdRef);
+  const handleRun = async () => {
+    if (!code.trim() || isRunning) return;
+    setIsRunning(true);
+    setRunResult(null);
+    try {
+      const result = await onRun(code, execLanguage);
+      setRunResult(result);
+    } finally {
+      setIsRunning(false);
+    }
   };
 
+  const handleSubmit = () => {
+    if (!code.trim()) return;
+    onSubmit(code, execLanguage);
+  };
 
   const handleHint = async () => {
     setHintLoading(true);
@@ -61,12 +76,10 @@ export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
     }
   };
 
-
   const editorLanguage =
-    state.language === "typescript" ? "typescript" :
-    state.language === "javascript" ? "javascript" :
-    state.language === "java"       ? "java"       : "python";
-
+    execLanguage === "typescript" ? "typescript" :
+    execLanguage === "javascript" ? "javascript" :
+    execLanguage === "java"       ? "java"       : "python";
 
   return (
     <div className="flex flex-col h-full">
@@ -136,7 +149,7 @@ export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
         </div>
       )}
 
-      {/* Monaco editor — always editable, students must be able to write their answer */}
+      {/* Monaco editor */}
       <div className="flex-1 min-h-0 bg-[var(--color-surface)]">
         <MonacoEditor
           height="100%"
@@ -145,18 +158,75 @@ export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
           onChange={v => setCode(v ?? "")}
           theme="vs-dark"
           options={{
-            fontSize:              13,
-            fontFamily:            "var(--font-mono)",
-            minimap:               { enabled: false },
-            lineNumbers:           "on",
-            scrollBeyondLastLine:  false,
-            padding:               { top: 12, bottom: 12 },
-            wordWrap:              "on",
-            renderLineHighlight:   "gutter",
-            readOnly:              false,
+            fontSize:             13,
+            fontFamily:           "var(--font-mono)",
+            minimap:              { enabled: false },
+            lineNumbers:          "on",
+            scrollBeyondLastLine: false,
+            padding:              { top: 12, bottom: 12 },
+            wordWrap:             "on",
+            renderLineHighlight:  "gutter",
+            readOnly:             false,
           }}
         />
       </div>
+
+      {/* Output panel — shown after every Run */}
+      <AnimatePresence>
+        {runResult && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden shrink-0 border-t border-[var(--color-border)]"
+          >
+            <div className="bg-[#1e1e1e] max-h-44 overflow-y-auto">
+              {/* Output header */}
+              <div className={`flex items-center justify-between px-3 py-1.5 border-b ${
+                runResult.exitCode === 0
+                  ? "border-[var(--color-success)] bg-[var(--color-success-highlight)]"
+                  : "border-[var(--color-error)]   bg-[var(--color-error-highlight)]"
+              }`}>
+                <div className="flex items-center gap-1.5">
+                  <Terminal size={11} className={runResult.exitCode === 0 ? "text-[var(--color-success)]" : "text-[var(--color-error)]"} />
+                  <span className="text-xs font-medium" style={{ color: runResult.exitCode === 0 ? "var(--color-success)" : "var(--color-error))" }}>
+                    {runResult.exitCode === 0 ? "Run succeeded" : "Run failed"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[var(--color-text-muted)]">{runResult.runtimeMs}ms</span>
+                  <button
+                    onClick={() => setRunResult(null)}
+                    className="text-[var(--color-text-faint)] hover:text-[var(--color-text)] transition-colors"
+                    aria-label="Clear output"
+                  >
+                    <XCircle size={12} />
+                  </button>
+                </div>
+              </div>
+
+              {/* stdout */}
+              {runResult.stdout && (
+                <pre className="px-3 py-2 text-xs text-[#d4d4d4] font-mono whitespace-pre-wrap leading-relaxed">
+                  {runResult.stdout}
+                </pre>
+              )}
+
+              {/* stderr */}
+              {runResult.stderr && (
+                <pre className="px-3 py-2 text-xs text-[#f48771] font-mono whitespace-pre-wrap leading-relaxed border-t border-[#3a3a3a]">
+                  {runResult.stderr}
+                </pre>
+              )}
+
+              {/* empty output */}
+              {!runResult.stdout && !runResult.stderr && (
+                <p className="px-3 py-2 text-xs text-[var(--color-text-faint)] italic">No output.</p>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Hint */}
       <AnimatePresence>
@@ -192,20 +262,36 @@ export function EditorPanel({ state, onRun, onRequestHint }: EditorPanelProps) {
               </Button>
             )}
           </div>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleRun}
-            loading={state.isExecuting}
-            disabled={!code.trim()}
-            className="gap-1.5"
-          >
-            <Play size={13} />
-            {state.isExecuting ? "Running…" : "Run code"}
-          </Button>
+
+          <div className="flex items-center gap-2">
+            {/* Run — executes locally, shows output inline */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleRun}
+              loading={isRunning}
+              disabled={!code.trim() || state.isExecuting}
+              className="gap-1.5"
+            >
+              <Play size={13} />
+              {isRunning ? "Running…" : "Run"}
+            </Button>
+
+            {/* Submit — sends code to tutor for evaluation */}
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSubmit}
+              loading={state.isLoading}
+              disabled={!code.trim()}
+              className="gap-1.5"
+            >
+              <Send size={13} />
+              {state.isLoading ? "Sending…" : "Submit to tutor"}
+            </Button>
+          </div>
         </div>
       )}
-
     </div>
   );
 }
