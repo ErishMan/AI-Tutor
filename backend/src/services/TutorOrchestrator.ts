@@ -17,7 +17,7 @@ import { evaluatePolicy, updateLearnerState } from "./PolicyEngine.js";
 import { updateSession } from "./SessionStore.js";
 import logger from "../utils/logger.js";
 
-const LIVE_TURN_WINDOW = 12;
+const LIVE_TURN_WINDOW  = 12;
 const MAX_CONTEXT_CHARS = 6000;
 
 function buildSystemPrompt(session: Session, allowedModes: TutorMode[]): string {
@@ -46,8 +46,8 @@ TEACHING STYLE
 ALLOWED MODES for this turn: ${allowedModes.join(", ")}
 You MUST choose one of these modes only.
 
-You MUST respond with a single JSON object and NOTHING else.
-Do not use markdown fences.
+You MUST respond with a single raw JSON object and NOTHING else.
+No markdown fences. No preamble. No explanation after the JSON.
 Do not put JSON inside "tutorMessage".
 "tutorMessage" must be plain conversational text for the learner.
 
@@ -81,8 +81,6 @@ ${session.contextSummary ?? "No prior summary — this is the start of the sessi
 }
 
 function buildContextMessages(session: Session): LLMMessage[] {
-  // Fix: reverse so we keep the MOST RECENT turns when the char budget is exhausted,
-  // then reverse again at the end to restore chronological order for the LLM.
   const recentTurns = session.turns.slice(-LIVE_TURN_WINDOW).reverse();
   let charCount = 0;
   const messages: LLMMessage[] = [];
@@ -99,33 +97,69 @@ function buildContextMessages(session: Session): LLMMessage[] {
       }
     }
 
-    // Check budget BEFORE pushing so we never include an over-budget message
     if (charCount + content.length > MAX_CONTEXT_CHARS) break;
 
     charCount += content.length;
     messages.push({ role: turn.role as "user" | "assistant", content });
   }
 
-  // Restore chronological order
   return messages.reverse();
 }
 
+/**
+ * Extract the first complete-looking JSON object from a raw LLM response.
+ *
+ * Handles:
+ * - Leading/trailing markdown fences (```json ... ```, ``` ... ```)
+ * - Prose before or after the JSON block
+ * - Truncated JSON (finish_reason=length): attempts bracket-completion repair
+ *   so a cutoff sandbox response doesn't fall all the way back to chat mode.
+ */
 function extractJSON(raw: string): string {
-  const cleaned = raw
-    .replace(/^```json?\n?/i, "")
-    .replace(/\n?```$/i, "")
+  // Strip ALL markdown fence variants robustly
+  let s = raw
+    .replace(/^```[a-zA-Z]*\n?/gm, "")
+    .replace(/^```\s*$/gm, "")
     .trim();
 
-  if (cleaned.startsWith("{")) return cleaned;
+  // Find the first '{' — skip any prose preamble
+  const start = s.indexOf("{");
+  if (start === -1) return s; // no JSON at all; let JSON.parse fail naturally
 
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-
-  if (start !== -1 && end !== -1 && end > start) {
-    return cleaned.slice(start, end + 1);
+  // Find the matching last '}'
+  const end = s.lastIndexOf("}");
+  if (end > start) {
+    return s.slice(start, end + 1);
   }
 
-  return cleaned;
+  // end <= start means the JSON was truncated (no closing '}')
+  // Attempt progressive repair: append missing braces/brackets
+  const partial = s.slice(start);
+  const repairs = [
+    partial + "}",
+    partial + "\"}",
+    partial + "\"\"}",
+    partial + "null}",
+    partial + "]}" ,
+    partial + "\"}}",
+    partial + "\"\"\n}}",
+    partial + "null}}",
+    partial + "]}",
+    partial + "\"]}}",
+  ];
+
+  for (const attempt of repairs) {
+    try {
+      JSON.parse(attempt);
+      logger.warn("extractJSON: repaired truncated JSON response — some fields may be missing");
+      return attempt;
+    } catch {
+      // try next repair
+    }
+  }
+
+  // All repairs failed; return the partial so JSON.parse gives a meaningful error
+  return partial;
 }
 
 function parseLLMDecision(
@@ -134,7 +168,7 @@ function parseLLMDecision(
   language: Language
 ): Omit<TutorDecision, "learnerState" | "uiDirectives"> & {
   newMisconceptions: string[];
-  resolvedConcepts: string[];
+  resolvedConcepts:  string[];
 } {
   let parsed: Record<string, unknown>;
 
@@ -142,15 +176,16 @@ function parseLLMDecision(
     parsed = JSON.parse(extractJSON(raw));
   } catch {
     logger.warn("LLM returned non-JSON, falling back to chat mode");
+    logger.debug(`Raw LLM output was: ${raw.slice(0, 400)}`);
     return {
-      mode: "chat",
-      tutorMessage: raw.trim() || "I'm here — what would you like to explore?",
-      objective: "Conversational engagement",
-      reasoning: "JSON parse failed — using raw text as chat message",
+      mode:              "chat",
+      tutorMessage:      raw.trim() || "I'm here — what would you like to explore?",
+      objective:         "Conversational engagement",
+      reasoning:         "JSON parse failed — using raw text as chat message",
       newMisconceptions: [],
-      resolvedConcepts: [],
-      sandboxTask: undefined,
-      testTask: undefined,
+      resolvedConcepts:  [],
+      sandboxTask:       undefined,
+      testTask:          undefined,
     };
   }
 
@@ -187,11 +222,11 @@ function parseLLMDecision(
 
   return {
     mode,
-    tutorMessage: String(tutorMessage ?? ""),
-    objective: String(parsed.objective ?? ""),
-    reasoning: String(parsed.reasoning ?? ""),
+    tutorMessage:      String(tutorMessage ?? ""),
+    objective:         String(parsed.objective ?? ""),
+    reasoning:         String(parsed.reasoning ?? ""),
     newMisconceptions: (parsed.newMisconceptions as string[]) ?? [],
-    resolvedConcepts: (parsed.resolvedConcepts as string[]) ?? [],
+    resolvedConcepts:  (parsed.resolvedConcepts as string[]) ?? [],
     sandboxTask,
     testTask,
   };
@@ -199,17 +234,15 @@ function parseLLMDecision(
 
 function buildUIDirectives(mode: TutorMode, frustration: number): UIDirectives {
   return {
-    openPanel: mode === "test" ? "test" : mode === "sandbox" ? "editor" : "chat",
-    showRunButton: mode === "sandbox" || mode === "test",
-    lockSolutionView: mode === "test",
-    showHintButton: mode === "sandbox",
+    openPanel:         mode === "test" ? "test" : mode === "sandbox" ? "editor" : "chat",
+    showRunButton:     mode === "sandbox" || mode === "test",
+    lockSolutionView:  mode === "test",
+    showHintButton:    mode === "sandbox",
     showProgressUpdate: frustration < 0.3,
-    progressMessage: frustration < 0.3 ? "You're making great progress! 🚀" : undefined,
+    progressMessage:   frustration < 0.3 ? "You're making great progress! 🚀" : undefined,
   };
 }
 
-// Fix: accept the composed turns so we summarise the freshly updated history,
-// not the stale session.turns that existed before this orchestration cycle.
 async function maybeCompressSummary(
   session: Session,
   composedTurns: ConversationTurn[]
@@ -225,7 +258,7 @@ async function maybeCompressSummary(
     const summary = await chatCompletion(
       [
         {
-          role: "system",
+          role:    "system",
           content:
             "Summarise this tutoring session excerpt in 3-5 bullet points. Focus on: " +
             "what concepts were covered, any mistakes the learner made, and their current " +
@@ -233,7 +266,7 @@ async function maybeCompressSummary(
         },
         { role: "user", content: text },
       ],
-      { temperature: 0.3, max_tokens: 200 }
+      { temperature: 0.3, max_tokens: 300 }
     );
 
     return `${session.contextSummary ?? ""}\n\n### Session summary (auto):\n${summary}`;
@@ -250,14 +283,14 @@ export async function orchestrate(
   codeLanguage?: Language
 ): Promise<TutorDecision> {
   const signals: TurnSignals = await extractSignals(userMessage, codeSource);
-  const updatedLearnerState = updateLearnerState(session.learnerState, signals);
-  const policy = evaluatePolicy(updatedLearnerState, signals, session);
+  const updatedLearnerState  = updateLearnerState(session.learnerState, signals);
+  const policy               = evaluatePolicy(updatedLearnerState, signals, session);
 
   if (policy.overrideReason) {
     logger.info(`Policy override: ${policy.overrideReason}`);
   }
 
-  const systemPrompt = buildSystemPrompt(session, policy.allowedModes);
+  const systemPrompt    = buildSystemPrompt(session, policy.allowedModes);
   const contextMessages = buildContextMessages(session);
 
   const userTurnContent = codeSource
@@ -270,10 +303,13 @@ export async function orchestrate(
     { role: "user", content: userTurnContent },
   ];
 
+  // json_mode is intentionally false: this model build rejects response_format
+  // with HTTP 400. The system prompt instructs the model to reply with raw JSON,
+  // and extractJSON + parseLLMDecision handle any prose wrapping or truncation.
   const rawResponse = await chatCompletion(messages, {
     temperature: 0.65,
-    max_tokens: 1200,
-    json_mode: true,
+    max_tokens:  1800,
+    json_mode:   false,
   });
 
   const parsed = parseLLMDecision(rawResponse, policy.allowedModes, session.language);
@@ -289,11 +325,11 @@ export async function orchestrate(
   };
 
   const userTurn: ConversationTurn = {
-    id: uuidv4(),
-    role: "user",
-    content: userMessage,
+    id:        uuidv4(),
+    role:      "user",
+    content:   userMessage,
     timestamp: Date.now(),
-    mode: session.currentMode,
+    mode:      session.currentMode,
     signals,
     ...(codeSource
       ? { codeSubmission: { language: codeLanguage ?? session.language, source: codeSource } }
@@ -301,33 +337,31 @@ export async function orchestrate(
   };
 
   const assistantTurn: ConversationTurn = {
-    id: uuidv4(),
-    role: "assistant",
-    content: parsed.tutorMessage,
+    id:        uuidv4(),
+    role:      "assistant",
+    content:   parsed.tutorMessage,
     timestamp: Date.now(),
-    mode: parsed.mode,
+    mode:      parsed.mode,
   };
 
-  // Fix: build composedTurns first, then pass to maybeCompressSummary so it
-  // summarises the up-to-date history rather than the pre-turn session.turns.
-  const composedTurns = [...session.turns, userTurn, assistantTurn];
+  const composedTurns  = [...session.turns, userTurn, assistantTurn];
   const updatedSummary = await maybeCompressSummary(session, composedTurns);
 
   updateSession(session.id, {
-    turns: composedTurns,
+    turns:       composedTurns,
     learnerState: finalLearnerState,
     currentMode: parsed.mode,
     ...(updatedSummary ? { contextSummary: updatedSummary } : {}),
   });
 
   return {
-    mode: parsed.mode,
+    mode:         parsed.mode,
     tutorMessage: parsed.tutorMessage,
-    objective: parsed.objective,
-    reasoning: parsed.reasoning,
+    objective:    parsed.objective,
+    reasoning:    parsed.reasoning,
     learnerState: finalLearnerState,
-    sandboxTask: parsed.sandboxTask,
-    testTask: parsed.testTask,
+    sandboxTask:  parsed.sandboxTask,
+    testTask:     parsed.testTask,
     uiDirectives: buildUIDirectives(parsed.mode, finalLearnerState.frustration),
   };
 }
