@@ -13,11 +13,12 @@ const executeSchema = z.object({
   source:             z.string().min(1).max(20000),
   language:           z.enum(["python", "javascript", "typescript", "java"]),
   mode:               z.enum(["sandbox", "test"]).default("sandbox"),
+  // Fix: withTutorFeedback is now read and honoured in the handler
   withTutorFeedback:  z.boolean().optional(),
 });
 
 router.post("/", validate(executeSchema), async (req: Request, res: Response) => {
-  const { sessionId, source, language, mode } = req.body;
+  const { sessionId, source, language, mode, withTutorFeedback } = req.body;
 
   const session = getSession(sessionId);
   if (!session) {
@@ -31,8 +32,9 @@ router.post("/", validate(executeSchema), async (req: Request, res: Response) =>
   let tutorFeedback: string | undefined;
   let assessmentReport;
 
-  // If in test mode and session has an active test task, run assessment
-  if (mode === "test") {
+  // Fix: only generate tutor feedback when mode is "test", a prior test turn
+  // exists, AND withTutorFeedback is not explicitly false.
+  if (mode === "test" && withTutorFeedback !== false) {
     const lastAssistantTurn = [...session.turns]
       .reverse()
       .find(t => t.role === "assistant" && t.mode === "test");

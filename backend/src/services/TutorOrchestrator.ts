@@ -81,7 +81,9 @@ ${session.contextSummary ?? "No prior summary — this is the start of the sessi
 }
 
 function buildContextMessages(session: Session): LLMMessage[] {
-  const recentTurns = session.turns.slice(-LIVE_TURN_WINDOW);
+  // Fix: reverse so we keep the MOST RECENT turns when the char budget is exhausted,
+  // then reverse again at the end to restore chronological order for the LLM.
+  const recentTurns = session.turns.slice(-LIVE_TURN_WINDOW).reverse();
   let charCount = 0;
   const messages: LLMMessage[] = [];
 
@@ -97,13 +99,15 @@ function buildContextMessages(session: Session): LLMMessage[] {
       }
     }
 
-    charCount += content.length;
-    if (charCount > MAX_CONTEXT_CHARS) break;
+    // Check budget BEFORE pushing so we never include an over-budget message
+    if (charCount + content.length > MAX_CONTEXT_CHARS) break;
 
+    charCount += content.length;
     messages.push({ role: turn.role as "user" | "assistant", content });
   }
 
-  return messages;
+  // Restore chronological order
+  return messages.reverse();
 }
 
 function extractJSON(raw: string): string {
@@ -204,10 +208,15 @@ function buildUIDirectives(mode: TutorMode, frustration: number): UIDirectives {
   };
 }
 
-async function maybeCompressSummary(session: Session): Promise<string | undefined> {
-  if (session.turns.length % 20 !== 0 || session.turns.length === 0) return undefined;
+// Fix: accept the composed turns so we summarise the freshly updated history,
+// not the stale session.turns that existed before this orchestration cycle.
+async function maybeCompressSummary(
+  session: Session,
+  composedTurns: ConversationTurn[]
+): Promise<string | undefined> {
+  if (composedTurns.length % 20 !== 0 || composedTurns.length === 0) return undefined;
 
-  const text = session.turns
+  const text = composedTurns
     .slice(-20)
     .map(t => `${t.role}: ${t.content.slice(0, 200)}`)
     .join("\n");
@@ -299,10 +308,13 @@ export async function orchestrate(
     mode: parsed.mode,
   };
 
-  const updatedSummary = await maybeCompressSummary(session);
+  // Fix: build composedTurns first, then pass to maybeCompressSummary so it
+  // summarises the up-to-date history rather than the pre-turn session.turns.
+  const composedTurns = [...session.turns, userTurn, assistantTurn];
+  const updatedSummary = await maybeCompressSummary(session, composedTurns);
 
   updateSession(session.id, {
-    turns: [...session.turns, userTurn, assistantTurn],
+    turns: composedTurns,
     learnerState: finalLearnerState,
     currentMode: parsed.mode,
     ...(updatedSummary ? { contextSummary: updatedSummary } : {}),

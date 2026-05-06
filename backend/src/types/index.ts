@@ -129,7 +129,8 @@ export interface UIDirectives {
 
 
 export interface PasteMetrics {
-  largePasseCount:      number;
+  // Fix: was misspelled as largePasseCount
+  largePasteCount:      number;
   lastPasteTimestamp?:  number;
   noTypingBeforeSubmit: boolean;
 }
@@ -168,15 +169,16 @@ export interface ChatRequest {
 
 export interface ChatResponse {
   sessionId: string;
-  decision:  TutorDecision;
+  decision:  Omit<TutorDecision, "reasoning">;
 }
 
 
 export interface ExecuteRequest {
-  sessionId:   string;
-  source:      string;
-  language:    Language;
-  testTaskId?: string;
+  sessionId:          string;
+  source:             string;
+  language:           Language;
+  testTaskId?:        string;
+  withTutorFeedback?: boolean;
 }
 
 

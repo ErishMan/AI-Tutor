@@ -42,11 +42,13 @@ router.post("/", validate(chatSchema), async (req: Request, res: Response) => {
     codeContext?.language
   );
 
+  // Fix: omit reasoning entirely from the response instead of re-adding it as
+  // an empty string, which was leaking a spurious field to the client.
   const { reasoning: _reasoning, ...safeDecision } = decision;
 
   const response: ChatResponse = {
     sessionId: session.id,
-    decision: { ...safeDecision, reasoning: "" },
+    decision: safeDecision,
   };
 
   res.json(response);

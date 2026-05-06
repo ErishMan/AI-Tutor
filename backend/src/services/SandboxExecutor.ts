@@ -121,9 +121,20 @@ async function executePython(source: string): Promise<ExecutionResult> {
 // ── TypeScript sandbox (strip types → execute as JS) ──────────────────────────
 
 async function executeTypeScript(source: string): Promise<ExecutionResult> {
+  // Fix: previous regex was too greedy and would mangle object literal values
+  // (e.g. `{ a: number }` → `{ a }`). The tighter regex below only strips
+  // type annotations that appear in function/variable declaration positions:
+  //   - parameter/variable annotations:  `name: Type` before = , ) ; {
+  //   - return-type annotations:          ): Type before whitespace+{
+  //   - generic type parameters:          <T> on function/class declarations only
   const stripped = source
-    .replace(/:\s*\w+(\[\])?(\s*\|?\s*\w+(\[\])?)*(?=\s*[=,);{])/g, "")
-    .replace(/<[^>]+>/g, "")
+    // Remove return-type annotations: `): SomeType {` → `){`
+    .replace(/\)\s*:\s*[\w<>\[\]|&., ]+(?=\s*\{)/g, ")")
+    // Remove parameter/variable type annotations: `name: Type` before = , ) ; {
+    .replace(/(\w)\s*:\s*[\w<>\[\]|&., ]+(?=\s*[=,);])/g, "$1")
+    // Remove generic type params on declarations only (function/class keyword precedes)
+    .replace(/(?<=(?:function|class)\s+\w+)<[^>]+>/g, "")
+    // Remove `export default` and `export` keywords
     .replace(/^export\s+(default\s+)?/gm, "");
   return executeJavaScript(stripped);
 }

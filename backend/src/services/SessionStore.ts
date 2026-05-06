@@ -49,7 +49,8 @@ export function createSession(
     learnerState: { ...defaultLearnerState },
     currentMode:  "chat",
     pasteMetrics: {
-      largePasseCount:      0,
+      // Fix: was misspelled as largePasseCount
+      largePasteCount:      0,
       noTypingBeforeSubmit: false,
     },
   };
