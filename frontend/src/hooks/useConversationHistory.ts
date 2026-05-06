@@ -4,7 +4,12 @@ import { ConversationMessage, LearnerState, UIDirectives, SandboxTask, TestTask,
 
 export interface SavedConversation {
   id:                 string;
-  // The backend sessionId at the time of last save — used to restore runCode
+  /**
+   * Fix (issue 3): backendSessionId is now always written by saveConversation
+   * so that restoring a conversation also restores the live backend session id.
+   * Without this, runCode silently aborted because state.sessionId was undefined
+   * after handleSelectConversation ran.
+   */
   backendSessionId?:  string;
   title:              string;
   createdAt:          number;
@@ -43,7 +48,7 @@ function generateTitle(messages: ConversationMessage[]): string {
   const firstUser = messages.find(m => m.role === "user");
   if (!firstUser) return "New conversation";
   const text = firstUser.content.slice(0, 50);
-  return text.length < firstUser.content.length ? text + "…" : text;
+  return text.length < firstUser.content.length ? text + "\u2026" : text;
 }
 
 export function useConversationHistory() {
@@ -55,15 +60,19 @@ export function useConversationHistory() {
     setConversations(loadFromStorage());
   }, []);
 
-  // Save current conversation.
-  // `id` is the FRONTEND-stable ID (history.activeId ?? state.sessionId from page.tsx).
-  // `backendSessionId` is state.sessionId — persisted separately so we can restore it.
+  /**
+   * Save current conversation.
+   * `id` is the FRONTEND-stable ID (history.activeId ?? state.sessionId).
+   * `backendSessionId` is state.sessionId — persisted so we can restore it
+   * when the user selects a past conversation and then tries to run code.
+   */
   const saveConversation = useCallback((
     id:                  string,
     messages:            ConversationMessage[],
     learnerState:        LearnerState,
     topic:               string,
     language:            string,
+    backendSessionId?:   string,   // Fix: added — was missing, so restored sessions had no sessionId
     currentMode?:        TutorMode,
     currentSandboxTask?: SandboxTask,
     currentTestTask?:    TestTask,
@@ -82,6 +91,7 @@ export function useConversationHistory() {
         learnerState,
         topic,
         language,
+        backendSessionId,  // Fix: persist the live backend session id
         currentMode,
         currentSandboxTask,
         currentTestTask,
@@ -122,8 +132,14 @@ export function useConversationHistory() {
       try {
         const conv = JSON.parse(e.target?.result as string) as SavedConversation;
         if (!conv.id || !conv.messages) throw new Error("Invalid format");
-        // Give it a fresh ID to avoid collisions
-        const imported = { ...conv, id: crypto.randomUUID(), updatedAt: Date.now() };
+        // Give it a fresh ID to avoid collisions; strip backendSessionId since
+        // the backend session it pointed to is long gone.
+        const imported = {
+          ...conv,
+          id:               crypto.randomUUID(),
+          updatedAt:        Date.now(),
+          backendSessionId: undefined,
+        };
         setConversations(prev => {
           const next = [imported, ...prev];
           saveToStorage(next);

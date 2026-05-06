@@ -23,24 +23,25 @@ export default function HomePage() {
   useEffect(() => { checkHealth(); }, [checkHealth]);
 
   // Auto-save whenever messages change.
-  // Always use the FRONTEND-stable activeId (not the backend sessionId) as the key
-  // so that resumed sessions update the existing sidebar entry rather than creating
-  // a duplicate.
+  // Always use the FRONTEND-stable activeId (not the backend sessionId) as the
+  // key so that resumed sessions update the existing sidebar entry rather than
+  // creating a duplicate.
   useEffect(() => {
     if (state.messages.length === 0) return;
 
-    // Prefer the history activeId (stable across backend session resets);
-    // fall back to state.sessionId only for brand-new sessions that haven't
-    // been registered yet.
     const saveId = history.activeId ?? state.sessionId;
     if (!saveId) return;
 
+    // Fix (issue 3): pass state.sessionId as backendSessionId so the saved
+    // conversation always carries the live backend session id. Without this,
+    // restored sessions had backendSessionId: undefined and runCode aborted.
     history.saveConversation(
       saveId,
       state.messages,
       state.learnerState,
       state.topic,
       state.language,
+      state.sessionId,          // <-- backendSessionId (new param)
       state.currentMode,
       state.currentSandboxTask,
       state.currentTestTask,
@@ -77,13 +78,16 @@ export default function HomePage() {
     dispatch({ type: "SET_TOPIC",      payload: conv.topic });
     dispatch({ type: "SET_LANGUAGE",   payload: conv.language as any });
 
-    // BUG FIX 1: restore the backend sessionId so runCode / requestHint don't
-    // silently abort on the `if (!state.sessionId) return` guard.
+    // Fix (issue 3): restore the backend sessionId so runCode / requestHint
+    // don't silently abort on the `if (!state.sessionId) return` guard.
+    // Note: if the backend has restarted, this session id is dead. The next
+    // sendMessage call will receive a 404, and the chat route will create a
+    // fresh session automatically (sessionId not found → createSession).
     if (conv.backendSessionId) {
       dispatch({ type: "SET_SESSION_ID", payload: conv.backendSessionId });
     }
 
-    // BUG FIX 2: restore editor/test panel state so the RightPanel stays open.
+    // Restore editor/test panel state so the RightPanel stays open
     if (conv.currentMode || conv.uiDirectives || conv.currentSandboxTask || conv.currentTestTask) {
       dispatch({
         type: "RESTORE_PANEL",

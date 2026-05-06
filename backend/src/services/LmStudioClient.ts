@@ -1,6 +1,12 @@
 /**
  * Thin client for the LM Studio OpenAI-compatible local endpoint.
  * Uses the /v1/chat/completions API.
+ *
+ * Fix (issues 1 & 2):
+ * - json_schema response_format caused HTTP 400 on many local models.
+ *   Replaced with json_object, which is universally supported by LM Studio.
+ * - Added a one-shot retry without any response_format for models that reject
+ *   structured-output requests entirely. The retry is transparent to callers.
  */
 import logger from "../utils/logger.js";
 
@@ -16,38 +22,36 @@ export interface LLMMessage {
 export interface LLMOptions {
   temperature?:  number;
   max_tokens?:   number;
-  /** If true, instructs LM Studio to return valid JSON */
+  /**
+   * If true, asks the model to return valid JSON.
+   * Uses response_format: { type: "json_object" } — the most widely supported
+   * structured-output mode for local LM Studio models.
+   * Falls back to a plain request (no response_format) if the model returns
+   * a non-2xx status, so even non-compliant models still work.
+   */
   json_mode?:    boolean;
   stop?:         string[];
 }
 
-export async function chatCompletion(
-  messages: LLMMessage[],
-  options:  LLMOptions = {},
-): Promise<string> {
-  const body = {
+async function doRequest(
+  messages:       LLMMessage[],
+  options:        LLMOptions,
+  useJsonFormat:  boolean,
+): Promise<Response> {
+  const body: Record<string, unknown> = {
     model:       MODEL,
     messages,
     temperature: options.temperature ?? 0.7,
     max_tokens:  options.max_tokens  ?? 1024,
-    ...(options.json_mode
-      ? {
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name:   "tutor_response",
-              strict: false,
-              schema: { type: "object" },
-            },
-          },
-        }
-      : {}),
     ...(options.stop ? { stop: options.stop } : {}),
   };
 
-  logger.debug(`LLM request: ${messages.length} messages, temp=${body.temperature}`);
+  if (useJsonFormat && options.json_mode) {
+    // json_object is supported by all LM Studio builds; json_schema is not.
+    body.response_format = { type: "json_object" };
+  }
 
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  return fetch(`${BASE_URL}/chat/completions`, {
     method:  "POST",
     headers: {
       "Content-Type":  "application/json",
@@ -55,6 +59,25 @@ export async function chatCompletion(
     },
     body: JSON.stringify(body),
   });
+}
+
+export async function chatCompletion(
+  messages: LLMMessage[],
+  options:  LLMOptions = {},
+): Promise<string> {
+  logger.debug(`LLM request: ${messages.length} messages, temp=${options.temperature ?? 0.7}`);
+
+  let res = await doRequest(messages, options, true);
+
+  // Retry without response_format if the model rejected the structured-output
+  // request (common with quantised models that don't implement the spec).
+  if (!res.ok && options.json_mode) {
+    logger.warn(
+      `LLM returned ${res.status} with json_mode — retrying without response_format. ` +
+      `Consider setting LM_STUDIO_JSON_MODE=false in .env if this persists.`
+    );
+    res = await doRequest(messages, options, false);
+  }
 
   if (!res.ok) {
     const err = await res.text();

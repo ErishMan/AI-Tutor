@@ -2,6 +2,15 @@
  * Extracts pedagogical signals from a raw user message,
  * using a lightweight LLM call for mastery detection,
  * with heuristics as fallback.
+ *
+ * Fix (issue 2):
+ * Remove json_mode: true from the mastery-detection call.
+ * This call runs before EVERY orchestration turn. Sending json_mode on a model
+ * that doesn't support response_format caused a 400 on every single request,
+ * forcing the fallback and adding latency noise before orchestration even ran.
+ * The heuristic fallback (masteryDemonstrated = false) is safe, so we simply
+ * drop the structured-output hint and rely on the system prompt instruction
+ * and extractJSON in the caller to parse whatever the model returns.
  */
 import { TurnSignals } from "../types/index.js";
 import { chatCompletion } from "./LmStudioClient.js";
@@ -86,11 +95,12 @@ export async function extractSignals(
 ): Promise<TurnSignals> {
   const heuristic = heuristicSignals(message);
 
-
   let masteryDemonstrated = false;
 
-
   try {
+    // Fix: removed json_mode: true — it caused HTTP 400 before every request on
+    // models that don't support response_format. The system prompt already asks
+    // for JSON; parseLLMDecision's extractJSON handles any wrapping.
     const response = await chatCompletion(
       [
         {
@@ -102,16 +112,20 @@ export async function extractSignals(
           content: `Student message: ${message}`,
         },
       ],
-      { temperature: 0.1, max_tokens: 80, json_mode: true },
+      { temperature: 0.1, max_tokens: 80 },
     );
 
-
-    const parsed = JSON.parse(response) as { masteryDemonstrated: boolean };
-    masteryDemonstrated = parsed.masteryDemonstrated ?? false;
+    // Parse robustly — extract the first JSON object from the response in case
+    // the model prefixes it with prose (which can happen without json_mode).
+    const start = response.indexOf("{");
+    const end   = response.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      const parsed = JSON.parse(response.slice(start, end + 1)) as { masteryDemonstrated: boolean };
+      masteryDemonstrated = parsed.masteryDemonstrated ?? false;
+    }
   } catch (err) {
     logger.warn("Signal extraction LLM call failed, defaulting mastery=false", err);
   }
-
 
   return {
     confusionDetected:      heuristic.confusionDetected      ?? false,
