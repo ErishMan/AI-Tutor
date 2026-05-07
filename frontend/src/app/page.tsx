@@ -10,7 +10,7 @@ import ConversationSidebar from "@/components/layout/ConversationSidebar";
 import { Language } from "@/types";
 
 export default function HomePage() {
-  const { state, sendMessage, runCode, requestHint, checkHealth, reset, dispatch } =
+  const { state, sendMessage, retryLastMessage, runCode, requestHint, checkHealth, reset, dispatch } =
     useTutorSession();
 
   const history = useConversationHistory();
@@ -21,10 +21,8 @@ export default function HomePage() {
   // Auto-save whenever messages change
   useEffect(() => {
     if (state.messages.length === 0) return;
-
     const saveId = history.activeId ?? state.sessionId;
     if (!saveId) return;
-
     history.saveConversation(
       saveId,
       state.messages,
@@ -44,14 +42,14 @@ export default function HomePage() {
     sendMessage(message).catch(err => console.error("sendMessage failed:", err));
   };
 
-  // Run code locally — returns result so EditorPanel can display it inline.
-  // Language comes from EditorPanel (task language > session language > python).
+  const handleRetry = () => {
+    retryLastMessage().catch(err => console.error("retryLastMessage failed:", err));
+  };
+
   const handleRun = async (source: string, language: Language) => {
     return runCode(source, language);
   };
 
-  // Submit code to tutor for evaluation — fires sendMessage with codeContext.
-  // This is the "ask the tutor to review my work" action.
   const handleSubmit = (source: string, language: Language) => {
     sendMessage(
       "I've written my solution — please review it.",
@@ -60,19 +58,14 @@ export default function HomePage() {
     ).catch(err => console.error("submitCode failed:", err));
   };
 
-  // Load a saved conversation into the session
   const handleSelectConversation = (conv: SavedConversation) => {
     dispatch({ type: "RESET" });
-
     conv.messages.forEach(msg => dispatch({ type: "ADD_MESSAGE", payload: msg }));
-
     dispatch({ type: "SET_TOPIC",    payload: conv.topic });
     dispatch({ type: "SET_LANGUAGE", payload: conv.language as Language });
-
     if (conv.backendSessionId) {
       dispatch({ type: "SET_SESSION_ID", payload: conv.backendSessionId });
     }
-
     if (conv.currentMode || conv.uiDirectives || conv.currentSandboxTask || conv.currentTestTask) {
       dispatch({
         type: "RESTORE_PANEL",
@@ -84,7 +77,6 @@ export default function HomePage() {
         },
       });
     }
-
     history.setActiveId(conv.id);
   };
 
@@ -95,7 +87,6 @@ export default function HomePage() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-bg)]" data-theme="">
-
       <ConversationSidebar
         conversations={history.conversations}
         activeId={history.activeId}
@@ -117,12 +108,14 @@ export default function HomePage() {
 
       <div className="flex flex-col flex-1 min-w-0">
         <TopBar state={state} />
-
         <main className="flex flex-1 min-h-0 overflow-hidden">
           <div className="flex-1 min-w-0 flex flex-col">
-            <ChatPanel state={state} onSend={handleSend} />
+            <ChatPanel
+              state={state}
+              onSend={handleSend}
+              onRetry={handleRetry}
+            />
           </div>
-
           <RightPanel
             state={state}
             onRun={handleRun}

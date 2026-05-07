@@ -32,10 +32,12 @@ export interface ExecutionResult {
 }
 
 export interface UIDirectives {
-  openPanel?:        "chat" | "editor" | "test";
-  lockSolutionView?: boolean;
-  showRunButton?:    boolean;
-  showHintButton?:   boolean;
+  openPanel?:         "chat" | "editor" | "test";
+  lockSolutionView?:  boolean;
+  showRunButton?:     boolean;
+  showHintButton?:    boolean;
+  showProgressUpdate?: boolean;
+  progressMessage?:   string;
 }
 
 export interface SandboxTask {
@@ -55,7 +57,7 @@ export interface TestTask {
   language:          Language;
 }
 
-// TutorDecision — this is exactly what the backend /chat route returns
+// TutorDecision — exactly what the backend /chat route returns
 export interface TutorDecision {
   mode:          TutorMode;
   tutorMessage:  string;
@@ -81,7 +83,7 @@ export interface ConversationMessage {
 }
 
 export interface SessionState {
-  sessionId?:          string;   // optional — created lazily on first message
+  sessionId?:          string;
   topic:               string;
   language:            Language;
   difficulty:          Difficulty;
@@ -98,17 +100,18 @@ export interface SessionState {
 
 // Discriminated union of all reducer actions
 export type SessionAction =
-  | { type: "SET_LOADING";          payload: boolean }
-  | { type: "SET_EXECUTING";        payload: boolean }
-  | { type: "SET_LM_STATUS";        payload: LmStatus }
-  | { type: "SET_SESSION_ID";       payload: string }
-  | { type: "SET_TOPIC";            payload: string }
-  | { type: "SET_LANGUAGE";         payload: Language }
-  | { type: "SET_DIFFICULTY";       payload: Difficulty }
-  | { type: "ADD_MESSAGE";          payload: ConversationMessage }
-  | { type: "APPLY_DECISION";       payload: TutorDecision }
-  | { type: "SET_EXECUTION_RESULT"; payload: { msgId: string; result: ExecutionResult } }
-  | { type: "RESTORE_PANEL";        payload: {
+  | { type: "SET_LOADING";             payload: boolean }
+  | { type: "SET_EXECUTING";           payload: boolean }
+  | { type: "SET_LM_STATUS";           payload: LmStatus }
+  | { type: "SET_SESSION_ID";          payload: string }
+  | { type: "SET_TOPIC";               payload: string }
+  | { type: "SET_LANGUAGE";            payload: Language }
+  | { type: "SET_DIFFICULTY";          payload: Difficulty }
+  | { type: "ADD_MESSAGE";             payload: ConversationMessage }
+  | { type: "REMOVE_LAST_ASSISTANT" }
+  | { type: "APPLY_DECISION";          payload: TutorDecision }
+  | { type: "SET_EXECUTION_RESULT";    payload: { msgId: string; result: ExecutionResult } }
+  | { type: "RESTORE_PANEL";           payload: {
       currentMode?:        TutorMode;
       currentSandboxTask?: SandboxTask;
       currentTestTask?:    TestTask;

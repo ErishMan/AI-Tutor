@@ -8,16 +8,23 @@ import { BookOpen } from "lucide-react";
 import { motion } from "motion/react";
 
 interface ChatPanelProps {
-  state:     SessionState;
-  onSend:    (message: string) => void;
+  state:    SessionState;
+  onSend:   (message: string) => void;
+  onRetry:  () => void;
 }
 
-export function ChatPanel({ state, onSend }: ChatPanelProps) {
+export function ChatPanel({ state, onSend, onRetry }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [state.messages.length]);
+
+  // Index of the last assistant message — only that one gets the action bar
+  let lastAssistantIdx = -1;
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    if (state.messages[i].role === "assistant") { lastAssistantIdx = i; break; }
+  }
 
   return (
     <div className="flex flex-col h-full">
@@ -33,9 +40,7 @@ export function ChatPanel({ state, onSend }: ChatPanelProps) {
               <BookOpen size={22} className="text-[var(--color-primary)]" />
             </div>
             <div>
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                Start your session
-              </p>
+              <p className="text-sm font-medium text-[var(--color-text)]">Start your session</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-1 max-w-xs">
                 Say hello, ask a question, or tell me what you&apos;re working on.
                 I&apos;ll adapt to where you are.
@@ -59,8 +64,13 @@ export function ChatPanel({ state, onSend }: ChatPanelProps) {
           </motion.div>
         ) : (
           <AnimatePresence initial={false}>
-            {state.messages.map(msg => (
-              <MessageBubble key={msg.id} message={msg} />
+            {state.messages.map((msg, idx) => (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                onRetry={idx === lastAssistantIdx && !state.isLoading ? onRetry : undefined}
+                isLoading={state.isLoading}
+              />
             ))}
           </AnimatePresence>
         )}

@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import { motion } from "motion/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -6,14 +7,29 @@ import { ConversationMessage } from "@/types";
 import { Badge } from "@/components/ui/Badge";
 import { modeColor, modeLabel, formatRuntime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import { CheckCircle2, XCircle, Clock } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, Copy, Check, RotateCcw } from "lucide-react";
 
 interface MessageBubbleProps {
-  message: ConversationMessage;
+  message:   ConversationMessage;
+  /** Only passed to the last assistant message — shows the action bar */
+  onRetry?:  () => void;
+  isLoading?: boolean;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
-  const isUser = message.role === "user";
+export function MessageBubble({ message, onRetry, isLoading }: MessageBubbleProps) {
+  const isUser   = message.role === "user";
+  const showBar  = !isUser && onRetry !== undefined;
+
+  const [hovered,  setHovered]  = useState(false);
+  const [copied,   setCopied]   = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch { /* clipboard blocked */ }
+  };
 
   return (
     <motion.div
@@ -21,6 +37,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", damping: 30, stiffness: 250 }}
       className={cn("flex gap-3", isUser ? "flex-row-reverse" : "flex-row")}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       {/* Avatar */}
       <div className={cn(
@@ -89,10 +107,44 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           </div>
         )}
 
-        {/* Timestamp */}
-        <span className="text-[10px] text-[var(--color-text-faint)] px-1">
-          {new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-        </span>
+        {/* Timestamp + action bar */}
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-[10px] text-[var(--color-text-faint)]">
+            {new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </span>
+
+          {/* Action buttons — only on last assistant message, visible on hover */}
+          {showBar && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: hovered ? 1 : 0 }}
+              transition={{ duration: 0.15 }}
+              className="flex items-center gap-1"
+            >
+              {/* Copy */}
+              <button
+                onClick={handleCopy}
+                title="Copy message"
+                className="p-1 rounded text-[var(--color-text-faint)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-offset)] transition-colors"
+              >
+                {copied
+                  ? <Check size={12} className="text-[var(--color-success)]" />
+                  : <Copy  size={12} />
+                }
+              </button>
+
+              {/* Retry */}
+              <button
+                onClick={onRetry}
+                disabled={isLoading}
+                title="Retry — regenerate this response"
+                className="p-1 rounded text-[var(--color-text-faint)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-offset)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RotateCcw size={12} className={isLoading ? "animate-spin" : ""} />
+              </button>
+            </motion.div>
+          )}
+        </div>
       </div>
     </motion.div>
   );
